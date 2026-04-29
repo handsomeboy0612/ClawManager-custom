@@ -218,6 +218,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		OSVersion:                req.OSVersion,
 		ImageRegistry:            req.ImageRegistry,
 		ImageTag:                 req.ImageTag,
+		ContainerPort:            runtimeConfig.Port,
 		EnvironmentOverridesJSON: environmentOverridesJSON,
 		StorageClass:             req.StorageClass,
 		MountPath:                runtimeConfig.MountPath,

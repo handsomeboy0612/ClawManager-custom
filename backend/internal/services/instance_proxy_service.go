@@ -455,9 +455,15 @@ func (s *InstanceProxyService) GetProxyURL(instanceID int, token string) string 
 }
 
 // GetTargetPortForInstance returns the service target port used by the instance type.
+// For custom instances the port saved at creation time is used so that containers
+// listening on non-standard ports (e.g. OpenClaw on 18789) are proxied correctly.
 func (s *InstanceProxyService) GetTargetPortForInstance(instance *models.Instance) int32 {
 	if instance == nil {
 		return 3001
+	}
+
+	if instance.ContainerPort > 0 {
+		return instance.ContainerPort
 	}
 
 	return buildRuntimeConfig(instance.Type, instance.OSType, instance.OSVersion, instance.ImageRegistry, instance.ImageTag).Port
