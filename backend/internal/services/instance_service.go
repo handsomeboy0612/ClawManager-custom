@@ -48,6 +48,8 @@ type CreateInstanceRequest struct {
 	ImageRegistry        *string             `json:"image_registry,omitempty"`
 	ImageTag             *string             `json:"image_tag,omitempty"`
 	ContainerPort        *int32              `json:"container_port,omitempty"`
+	Command              []string            `json:"command,omitempty"`
+	Args                 []string            `json:"args,omitempty"`
 	EnvironmentOverrides map[string]string   `json:"environment_overrides,omitempty"`
 	StorageClass         string              `json:"storage_class"`
 	OpenClawConfigPlan   *OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
@@ -322,6 +324,8 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		ImagePullPolicy:    corev1.PullPolicy(defaultImagePullPolicy()),
 		ExtraEnv:           extraEnv,
 		EnvFromSecretNames: []string{bootstrapSecretName},
+		Command:            req.Command,
+		Args:               req.Args,
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)

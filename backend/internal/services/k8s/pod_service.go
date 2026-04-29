@@ -50,6 +50,10 @@ type PodConfig struct {
 	ImagePullPolicy    corev1.PullPolicy
 	ExtraEnv           map[string]string
 	EnvFromSecretNames []string
+	// Command overrides the container's default ENTRYPOINT when non-empty.
+	Command []string
+	// Args overrides the container's default CMD when non-empty.
+	Args []string
 }
 
 // CreatePod creates a new pod for an instance
@@ -113,6 +117,8 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 					Name:            "desktop",
 					Image:           config.Image,
 					ImagePullPolicy: pullPolicy,
+					Command:         config.Command,
+					Args:            config.Args,
 					Ports: []corev1.ContainerPort{
 						{
 							ContainerPort: config.ContainerPort,

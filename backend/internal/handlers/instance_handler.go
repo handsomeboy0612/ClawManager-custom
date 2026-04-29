@@ -96,6 +96,8 @@ type CreateInstanceRequest struct {
 	ImageRegistry        *string                      `json:"image_registry,omitempty"`
 	ImageTag             *string                      `json:"image_tag,omitempty"`
 	ContainerPort        *int32                       `json:"container_port,omitempty"`
+	Command              []string                     `json:"command,omitempty"`
+	Args                 []string                     `json:"args,omitempty"`
 	EnvironmentOverrides map[string]string            `json:"environment_overrides,omitempty"`
 	StorageClass         string                       `json:"storage_class"`
 	OpenClawConfigPlan   *services.OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
@@ -203,6 +205,8 @@ func (h *InstanceHandler) CreateInstance(c *gin.Context) {
 		ImageRegistry:        req.ImageRegistry,
 		ImageTag:             req.ImageTag,
 		ContainerPort:        req.ContainerPort,
+		Command:              req.Command,
+		Args:                 req.Args,
 		EnvironmentOverrides: req.EnvironmentOverrides,
 		StorageClass:         req.StorageClass,
 		OpenClawConfigPlan:   req.OpenClawConfigPlan,
