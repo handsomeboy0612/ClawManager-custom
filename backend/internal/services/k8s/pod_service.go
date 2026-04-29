@@ -119,38 +119,9 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 							Name:          "http",
 						},
 					},
-					StartupProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							TCPSocket: &corev1.TCPSocketAction{
-								Port: intstrFromInt32(config.ContainerPort),
-							},
-						},
-						FailureThreshold: 30,
-						PeriodSeconds:    5,
-						TimeoutSeconds:   2,
-					},
-					ReadinessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							TCPSocket: &corev1.TCPSocketAction{
-								Port: intstrFromInt32(config.ContainerPort),
-							},
-						},
-						InitialDelaySeconds: 3,
-						PeriodSeconds:       5,
-						TimeoutSeconds:      2,
-						FailureThreshold:    6,
-					},
-					LivenessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							TCPSocket: &corev1.TCPSocketAction{
-								Port: intstrFromInt32(config.ContainerPort),
-							},
-						},
-						InitialDelaySeconds: 15,
-						PeriodSeconds:       10,
-						TimeoutSeconds:      2,
-						FailureThreshold:    3,
-					},
+				StartupProbe:   buildStartupProbe(config.Type, config.ContainerPort),
+				ReadinessProbe: buildReadinessProbe(config.Type, config.ContainerPort),
+				LivenessProbe:  buildLivenessProbe(config.Type, config.ContainerPort),
 					Resources: resources,
 					VolumeMounts: []corev1.VolumeMount{
 						{
@@ -334,6 +305,57 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// isCustomInstance returns true for instance types whose containers are
+// externally supplied and may not expose a predictable health-check port.
+// Probes are skipped for these types to avoid false-positive failures.
+func isCustomInstance(instanceType string) bool {
+	return instanceType == "custom"
+}
+
+func buildStartupProbe(instanceType string, port int32) *corev1.Probe {
+	if isCustomInstance(instanceType) {
+		return nil
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstrFromInt32(port)},
+		},
+		FailureThreshold: 30,
+		PeriodSeconds:    5,
+		TimeoutSeconds:   2,
+	}
+}
+
+func buildReadinessProbe(instanceType string, port int32) *corev1.Probe {
+	if isCustomInstance(instanceType) {
+		return nil
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstrFromInt32(port)},
+		},
+		InitialDelaySeconds: 3,
+		PeriodSeconds:       5,
+		TimeoutSeconds:      2,
+		FailureThreshold:    6,
+	}
+}
+
+func buildLivenessProbe(instanceType string, port int32) *corev1.Probe {
+	if isCustomInstance(instanceType) {
+		return nil
+	}
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstrFromInt32(port)},
+		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      2,
+		FailureThreshold:    3,
+	}
 }
 
 func (s *PodService) waitForPodDeletion(ctx context.Context, namespace, podName string) error {
