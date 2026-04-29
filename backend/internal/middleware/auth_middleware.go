@@ -24,6 +24,14 @@ func Auth() gin.HandlerFunc {
 			return
 		}
 
+		// External API key auth: allows trusted services (e.g. new-yunwu-api) to act as admin
+		if externalKey := os.Getenv("CLAWMANAGER_EXTERNAL_API_KEY"); externalKey != "" && tokenString == externalKey {
+			c.Set("userID", 1)
+			c.Set("isExternalAPI", true)
+			c.Next()
+			return
+		}
+
 		claims, err := validateUserAccessToken(tokenString)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{

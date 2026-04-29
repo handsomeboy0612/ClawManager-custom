@@ -47,6 +47,7 @@ type CreateInstanceRequest struct {
 	OSVersion            string              `json:"os_version" validate:"required"`
 	ImageRegistry        *string             `json:"image_registry,omitempty"`
 	ImageTag             *string             `json:"image_tag,omitempty"`
+	ContainerPort        *int32              `json:"container_port,omitempty"`
 	EnvironmentOverrides map[string]string   `json:"environment_overrides,omitempty"`
 	StorageClass         string              `json:"storage_class"`
 	OpenClawConfigPlan   *OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
@@ -191,6 +192,9 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 			req.ImageTag = nil
 			runtimeConfig = buildRuntimeConfig(req.Type, req.OSType, req.OSVersion, req.ImageRegistry, req.ImageTag)
 		}
+	}
+	if req.ContainerPort != nil && *req.ContainerPort > 0 {
+		runtimeConfig.Port = *req.ContainerPort
 	}
 
 	// Check if there are any orphaned resources from previous failed creations
