@@ -95,6 +95,7 @@ type CreateInstanceRequest struct {
 	OSVersion            string                       `json:"os_version" binding:"required"`
 	ImageRegistry        *string                      `json:"image_registry,omitempty"`
 	ImageTag             *string                      `json:"image_tag,omitempty"`
+	ContainerPort        *int32                       `json:"container_port,omitempty"`
 	EnvironmentOverrides map[string]string            `json:"environment_overrides,omitempty"`
 	StorageClass         string                       `json:"storage_class"`
 	OpenClawConfigPlan   *services.OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
@@ -201,6 +202,7 @@ func (h *InstanceHandler) CreateInstance(c *gin.Context) {
 		OSVersion:            req.OSVersion,
 		ImageRegistry:        req.ImageRegistry,
 		ImageTag:             req.ImageTag,
+		ContainerPort:        req.ContainerPort,
 		EnvironmentOverrides: req.EnvironmentOverrides,
 		StorageClass:         req.StorageClass,
 		OpenClawConfigPlan:   req.OpenClawConfigPlan,
