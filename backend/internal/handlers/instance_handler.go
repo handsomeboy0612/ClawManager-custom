@@ -709,8 +709,12 @@ func (h *InstanceHandler) GenerateAccessToken(c *gin.Context) {
 		return
 	}
 
-	// Check if instance is running
-	if instance.Status != "running" {
+	// Check if instance is running.
+	// Custom instances (e.g. native OpenClaw) have no in-pod agent, so their
+	// Status stays "creating" even after the pod is fully up. We treat a custom
+	// instance as accessible as long as its Pod has been assigned an IP.
+	isCustomRunning := instance.Type == "custom" && instance.PodIP != nil && *instance.PodIP != ""
+	if instance.Status != "running" && !isCustomRunning {
 		utils.Error(c, http.StatusBadRequest, "Instance is not running")
 		return
 	}
