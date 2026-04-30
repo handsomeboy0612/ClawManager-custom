@@ -203,6 +203,15 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	fmt.Printf("Checking for orphaned resources for user %d before creating new instance...\n", userID)
 	s.cleanupOrphanedResourcesByUser(ctx, userID)
 
+	commandJSON, err := marshalStringSlice(req.Command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode command: %w", err)
+	}
+	argsJSON, err := marshalStringSlice(req.Args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode args: %w", err)
+	}
+
 	// Create instance record
 	now := time.Now()
 	instance := &models.Instance{
@@ -221,6 +230,8 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		ImageRegistry:            req.ImageRegistry,
 		ImageTag:                 req.ImageTag,
 		ContainerPort:            runtimeConfig.Port,
+		CommandJSON:              commandJSON,
+		ArgsJSON:                 argsJSON,
 		EnvironmentOverridesJSON: environmentOverridesJSON,
 		StorageClass:             req.StorageClass,
 		MountPath:                runtimeConfig.MountPath,
@@ -479,6 +490,20 @@ func (s *instanceService) Start(instanceID int) error {
 		return fmt.Errorf("failed to delete network policy: %w", err)
 	}
 
+	command, err := unmarshalStringSlice(instance.CommandJSON)
+	if err != nil {
+		return fmt.Errorf("failed to decode persisted command: %w", err)
+	}
+	args, err := unmarshalStringSlice(instance.ArgsJSON)
+	if err != nil {
+		return fmt.Errorf("failed to decode persisted args: %w", err)
+	}
+
+	containerPort := runtimeConfig.Port
+	if instance.ContainerPort > 0 {
+		containerPort = instance.ContainerPort
+	}
+
 	podConfig := k8s.PodConfig{
 		InstanceID:         instance.ID,
 		InstanceName:       instance.Name,
@@ -490,10 +515,12 @@ func (s *instanceService) Start(instanceID int) error {
 		GPUCount:           instance.GPUCount,
 		Image:              runtimeConfig.Image,
 		MountPath:          instance.MountPath,
-		ContainerPort:      runtimeConfig.Port,
+		ContainerPort:      containerPort,
 		ImagePullPolicy:    corev1.PullPolicy(defaultImagePullPolicy()),
 		ExtraEnv:           extraEnv,
 		EnvFromSecretNames: []string{bootstrapSecretName},
+		Command:            command,
+		Args:               args,
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)
@@ -508,8 +535,8 @@ func (s *instanceService) Start(instanceID int) error {
 			InstanceID:      instance.ID,
 			InstanceName:    instance.Name,
 			UserID:          instance.UserID,
-			ContainerPort:   runtimeConfig.Port,
-			AdditionalPorts: additionalServicePorts(runtimeConfig.Port),
+			ContainerPort:   containerPort,
+			AdditionalPorts: additionalServicePorts(containerPort),
 		}
 		_, err = s.serviceService.CreateService(ctx, serviceConfig)
 		if err != nil {

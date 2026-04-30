@@ -66,6 +66,29 @@ func parseEnvironmentOverridesJSON(raw *string) (map[string]string, error) {
 	return normalized, nil
 }
 
+func marshalStringSlice(values []string) (*string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
+	}
+	encoded := string(raw)
+	return &encoded, nil
+}
+
+func unmarshalStringSlice(raw *string) ([]string, error) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(*raw)), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
 func buildInstancePodEnv(instance *models.Instance, runtimeEnv, gatewayEnv, agentEnv map[string]string) (map[string]string, error) {
 	if instance == nil {
 		return nil, fmt.Errorf("instance is required")

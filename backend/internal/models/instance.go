@@ -23,6 +23,8 @@ type Instance struct {
 	ImageRegistry            *string    `db:"image_registry" json:"image_registry,omitempty"`
 	ImageTag                 *string    `db:"image_tag" json:"image_tag,omitempty"`
 	ContainerPort            int32      `db:"container_port" json:"container_port"`
+	CommandJSON              *string    `db:"command_json" json:"-"`
+	ArgsJSON                 *string    `db:"args_json" json:"-"`
 	EnvironmentOverridesJSON *string    `db:"environment_overrides_json" json:"-"`
 	StorageClass             string     `db:"storage_class" json:"storage_class"`
 	MountPath                string     `db:"mount_path" json:"mount_path"`
