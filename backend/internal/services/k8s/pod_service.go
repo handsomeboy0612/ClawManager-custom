@@ -54,6 +54,24 @@ const customPodFSGroup int64 = 1000
 // the volume's pre-existing ownership.
 const customPodInitRunAsRoot int64 = 0
 
+// Overcommit configuration for custom-type pods (e.g. OpenClaw).
+//
+// customOvercommitFactor controls how aggressively we shrink resource
+// Requests relative to Limits. With factor=8, a pod selling "4 vCPU / 8 GB"
+// will reserve only 0.5 vCPU / 1 GB on the node, allowing ~8x denser packing.
+// Limits are unchanged, so a pod that genuinely tries to use its full quota
+// is still capped at the advertised value (CPU is throttled, memory is
+// OOMKilled).
+//
+// Floors prevent specs from collapsing to scheduler-meaningless values:
+// requesting 0 CPU would let the scheduler treat a pod as effectively free,
+// which can lead to runaway packing and node-level pressure.
+const (
+	customOvercommitFactor    = 8
+	customMinCPURequestMillis = 125 // 0.125 vCPU
+	customMinMemRequestMiB    = 256
+)
+
 // PodConfig holds configuration for creating a pod
 type PodConfig struct {
 	InstanceID         int
@@ -86,17 +104,24 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 	namespace := s.client.GetNamespace(config.UserID)
 	pvcName := s.client.GetPVCName(config.InstanceID)
 
-	// Build resource requirements
-	resources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%g", config.CPUCores)),
-			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", config.MemoryGB)),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%g", config.CPUCores)),
-			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", config.MemoryGB)),
-		},
-	}
+	// Build resource requirements.
+	//
+	// For custom-type pods (e.g. OpenClaw), we split Requests and Limits to
+	// enable safe overcommit on a single multi-tenant node:
+	//   - Limits   = user-selected spec (hard cap; CPU is throttled, memory
+	//                triggers OOMKill if exceeded).
+	//   - Requests = spec / customOvercommitFactor, used by the kube-scheduler
+	//                to decide how many pods can fit on a node. Setting
+	//                Requests << Limits gives the pod a Burstable QoS class.
+	//
+	// OpenClaw is a Node.js gateway proxy: idle CPU is near zero and resident
+	// memory is typically 150-500 MiB, so 8x packing is comfortable. Floors
+	// keep tiny specs from collapsing to zero requests, which would let the
+	// scheduler pack pods unrealistically tightly.
+	//
+	// Built-in (non-custom) types keep Requests == Limits (Guaranteed QoS) to
+	// preserve historical behaviour for resource-sensitive workloads.
+	resources := buildResourceRequirements(config)
 
 	// Add GPU resources if enabled
 	if config.GPUEnabled && config.GPUCount > 0 {
@@ -340,6 +365,53 @@ func containsSubstring(s, substr string) bool {
 // Probes are skipped for these types to avoid false-positive failures.
 func isCustomInstance(instanceType string) bool {
 	return instanceType == "custom"
+}
+
+// buildResourceRequirements computes the Pod's Requests/Limits.
+//
+// For custom-type pods we apply the overcommit policy described next to the
+// customOvercommitFactor constant. For all other types we keep the legacy
+// Requests==Limits (Guaranteed QoS) behaviour so resource-sensitive built-in
+// workloads are unaffected.
+//
+// GPU is added by the caller when GPUEnabled, since GPU resources cannot be
+// fractional and must always be Requested == Limited 1:1.
+func buildResourceRequirements(config PodConfig) corev1.ResourceRequirements {
+	cpuLimitStr := fmt.Sprintf("%g", config.CPUCores)
+	memLimitStr := fmt.Sprintf("%dGi", config.MemoryGB)
+
+	if !isCustomInstance(config.Type) {
+		return corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(cpuLimitStr),
+				corev1.ResourceMemory: resource.MustParse(memLimitStr),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(cpuLimitStr),
+				corev1.ResourceMemory: resource.MustParse(memLimitStr),
+			},
+		}
+	}
+
+	cpuRequestMillis := int64(config.CPUCores * 1000 / customOvercommitFactor)
+	if cpuRequestMillis < customMinCPURequestMillis {
+		cpuRequestMillis = customMinCPURequestMillis
+	}
+	memRequestMiB := int64(config.MemoryGB) * 1024 / customOvercommitFactor
+	if memRequestMiB < customMinMemRequestMiB {
+		memRequestMiB = customMinMemRequestMiB
+	}
+
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%dm", cpuRequestMillis)),
+			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", memRequestMiB)),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpuLimitStr),
+			corev1.ResourceMemory: resource.MustParse(memLimitStr),
+		},
+	}
 }
 
 // buildPodSecurityContext returns a PodSecurityContext that grants the
