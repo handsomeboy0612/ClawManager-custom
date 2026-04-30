@@ -43,7 +43,7 @@ import (
 // config update itself to be reported as success.
 const openclawRuntimeConfigUpdateScript = `set -e
 JSON="$(cat)"
-node /app/openclaw.mjs config set --batch-json "$JSON"
+node /app/openclaw.mjs config set --replace --batch-json "$JSON"
 pkill -TERM -x openclaw || true
 `
 
