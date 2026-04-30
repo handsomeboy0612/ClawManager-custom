@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,13 @@ import (
 // stream from the exec pipeline rather than a real workspace dump.
 const openclawMinArchiveBytes = 100
 
+// openclawRuntimeConfigMaxRequestBytes caps the size of a runtime
+// config update request body. It must stay aligned with
+// services.openclawRuntimeConfigMaxBytes; we reject early at the HTTP
+// layer to avoid reading a multi-MB body just to fail validation in
+// the service.
+const openclawRuntimeConfigMaxRequestBytes = 64 * 1024
+
 // openclawMaxUploadBytes caps the size of an .openclaw import upload.
 // Must align with the edge nginx client_max_body_size so that oversize
 // uploads produce a structured JSON 413 here instead of an opaque HTML
@@ -40,6 +48,7 @@ type InstanceHandler struct {
 	proxyService                  *services.InstanceProxyService
 	openClawTransferService       services.OpenClawTransferService
 	openClawConfigService         services.OpenClawConfigService
+	openClawRuntimeConfigService  services.OpenClawRuntimeConfigService
 	skillService                  services.SkillService
 }
 
@@ -56,6 +65,7 @@ func NewInstanceHandler(instanceService services.InstanceService, instanceAgentS
 		proxyService:                  services.NewInstanceProxyService(accessService),
 		openClawTransferService:       services.NewOpenClawTransferService(),
 		openClawConfigService:         openClawConfigService,
+		openClawRuntimeConfigService:  services.NewOpenClawRuntimeConfigService(),
 		skillService:                  skillService,
 	}
 }
@@ -96,6 +106,7 @@ type CreateInstanceRequest struct {
 	ImageRegistry        *string                      `json:"image_registry,omitempty"`
 	ImageTag             *string                      `json:"image_tag,omitempty"`
 	ContainerPort        *int32                       `json:"container_port,omitempty"`
+	MountPath            *string                      `json:"mount_path,omitempty"`
 	Command              []string                     `json:"command,omitempty"`
 	Args                 []string                     `json:"args,omitempty"`
 	EnvironmentOverrides map[string]string            `json:"environment_overrides,omitempty"`
@@ -205,6 +216,7 @@ func (h *InstanceHandler) CreateInstance(c *gin.Context) {
 		ImageRegistry:        req.ImageRegistry,
 		ImageTag:             req.ImageTag,
 		ContainerPort:        req.ContainerPort,
+		MountPath:            req.MountPath,
 		Command:              req.Command,
 		Args:                 req.Args,
 		EnvironmentOverrides: req.EnvironmentOverrides,
@@ -992,6 +1004,65 @@ func (h *InstanceHandler) ImportOpenClaw(c *gin.Context) {
 	}
 
 	utils.Success(c, http.StatusOK, "OpenClaw workspace imported successfully", nil)
+}
+
+// UpdateOpenClawRuntimeConfig applies a live config update to a running
+// OpenClaw instance without restarting the Pod. The request body is the
+// raw `[{path, value}, ...]` array that `openclaw config set
+// --batch-json` consumes, capped at openclawRuntimeConfigMaxRequestBytes.
+//
+// Auth: caller must own the instance (or be admin / external API).
+// Type:  instance must be of type "openclaw" or "custom" (the latter
+//        covers new-yunwu-api created OpenClaw instances which use
+//        type=custom + the official ghcr.io/openclaw/openclaw image).
+// State: instance must be running.
+//
+// On success, the gateway is signalled to terminate; the in-pod
+// supervisor restarts it within ~1s with the new config. The Service
+// IP and proxy URL stay the same; existing browser sessions only need
+// to reconnect their websocket.
+func (h *InstanceHandler) UpdateOpenClawRuntimeConfig(c *gin.Context) {
+	instance, ok := h.requireOwnedInstance(c)
+	if !ok {
+		return
+	}
+
+	switch strings.ToLower(instance.Type) {
+	case "openclaw", "custom":
+		// allowed
+	default:
+		utils.Error(c, http.StatusBadRequest, "Runtime config updates are only supported on openclaw or custom instances")
+		return
+	}
+
+	if !strings.EqualFold(instance.Status, "running") {
+		utils.Error(c, http.StatusBadRequest, fmt.Sprintf("Instance must be running to update config (current status: %s)", instance.Status))
+		return
+	}
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, openclawRuntimeConfigMaxRequestBytes)
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			utils.Error(c, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("Request body too large; maximum is %d bytes", openclawRuntimeConfigMaxRequestBytes))
+			return
+		}
+		utils.Error(c, http.StatusBadRequest, "Failed to read request body")
+		return
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		utils.Error(c, http.StatusBadRequest, "Request body is required")
+		return
+	}
+
+	if err := h.openClawRuntimeConfigService.UpdateRuntimeConfig(c.Request.Context(), instance, body); err != nil {
+		utils.Error(c, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	utils.Success(c, http.StatusOK, "OpenClaw runtime config updated", nil)
 }
 
 func (h *InstanceHandler) requireOwnedInstance(c *gin.Context) (*models.Instance, bool) {

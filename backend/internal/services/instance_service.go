@@ -48,6 +48,7 @@ type CreateInstanceRequest struct {
 	ImageRegistry        *string             `json:"image_registry,omitempty"`
 	ImageTag             *string             `json:"image_tag,omitempty"`
 	ContainerPort        *int32              `json:"container_port,omitempty"`
+	MountPath            *string             `json:"mount_path,omitempty"`
 	Command              []string            `json:"command,omitempty"`
 	Args                 []string            `json:"args,omitempty"`
 	EnvironmentOverrides map[string]string   `json:"environment_overrides,omitempty"`
@@ -197,6 +198,11 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	}
 	if req.ContainerPort != nil && *req.ContainerPort > 0 {
 		runtimeConfig.Port = *req.ContainerPort
+	}
+	if req.MountPath != nil {
+		if trimmed := strings.TrimSpace(*req.MountPath); trimmed != "" {
+			runtimeConfig.MountPath = trimmed
+		}
 	}
 
 	// Check if there are any orphaned resources from previous failed creations

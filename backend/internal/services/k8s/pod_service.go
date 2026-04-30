@@ -34,6 +34,13 @@ func (s *PodService) GetClient() *Client {
 	return s.client
 }
 
+// customPodFSGroup is the gid applied to mounted volumes for custom pods.
+// It matches the OpenClaw image's runtime user (node, uid=1000, gid=1000)
+// so the container can write to the persistent volume mounted at the
+// pod's writable data directory. Without this, K8s mounts volumes as
+// root:root 0755 and the non-root container fails with EACCES.
+const customPodFSGroup int64 = 1000
+
 // PodConfig holds configuration for creating a pod
 type PodConfig struct {
 	InstanceID         int
@@ -111,7 +118,8 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:   corev1.RestartPolicyNever,
+			SecurityContext: buildPodSecurityContext(config.Type),
 			Containers: []corev1.Container{
 				{
 					Name:            "desktop",
@@ -318,6 +326,22 @@ func containsSubstring(s, substr string) bool {
 // Probes are skipped for these types to avoid false-positive failures.
 func isCustomInstance(instanceType string) bool {
 	return instanceType == "custom"
+}
+
+// buildPodSecurityContext returns a PodSecurityContext that grants the
+// configured fsGroup ownership to mounted volumes for custom-type pods.
+// This is required so that non-root container processes (e.g. OpenClaw's
+// node user with uid/gid 1000) can write to the persistent volume mounted
+// at the pod's data directory. Returns nil for built-in instance types,
+// which run as root and do not need fsGroup adjustments.
+func buildPodSecurityContext(instanceType string) *corev1.PodSecurityContext {
+	if !isCustomInstance(instanceType) {
+		return nil
+	}
+	gid := customPodFSGroup
+	return &corev1.PodSecurityContext{
+		FSGroup: &gid,
+	}
 }
 
 func buildStartupProbe(instanceType string, port int32) *corev1.Probe {

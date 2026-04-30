@@ -9,10 +9,7 @@ import (
 	"strings"
 
 	"clawreef/internal/services/k8s"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes/scheme"
 	k8sexec "k8s.io/client-go/util/exec"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 const (
@@ -32,12 +29,14 @@ type OpenClawTransferService interface {
 }
 
 type openClawTransferService struct {
-	podService *k8s.PodService
+	podService  *k8s.PodService
+	execService *k8s.ExecService
 }
 
 func NewOpenClawTransferService() OpenClawTransferService {
 	return &openClawTransferService{
-		podService: k8s.NewPodService(),
+		podService:  k8s.NewPodService(),
+		execService: k8s.NewExecService(),
 	}
 }
 
@@ -126,40 +125,19 @@ func (s *openClawTransferService) Import(ctx context.Context, userID, instanceID
 }
 
 func (s *openClawTransferService) exec(ctx context.Context, userID, instanceID int, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if s.podService == nil || s.podService.GetClient() == nil || s.podService.GetClient().Clientset == nil {
-		return fmt.Errorf("k8s client not initialized")
-	}
-
 	pod, err := s.podService.GetPod(ctx, userID, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to get pod: %w", err)
 	}
 
-	req := s.podService.GetClient().Clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(pod.Name).
-		Namespace(pod.Namespace).
-		SubResource("exec")
-
-	req.VersionedParams(&corev1.PodExecOptions{
+	return s.execService.Exec(ctx, k8s.ExecOptions{
+		Namespace: pod.Namespace,
+		PodName:   pod.Name,
 		Container: "desktop",
 		Command:   command,
-		Stdin:     stdin != nil,
-		Stdout:    stdout != nil,
-		Stderr:    stderr != nil,
-		TTY:       false,
-	}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(s.podService.GetClient().Config, "POST", req.URL())
-	if err != nil {
-		return fmt.Errorf("failed to initialize exec stream: %w", err)
-	}
-
-	return exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  stdin,
-		Stdout: stdout,
-		Stderr: stderr,
-		Tty:    false,
+		Stdin:     stdin,
+		Stdout:    stdout,
+		Stderr:    stderr,
 	})
 }
 
