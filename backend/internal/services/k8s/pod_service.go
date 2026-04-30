@@ -37,9 +37,22 @@ func (s *PodService) GetClient() *Client {
 // customPodFSGroup is the gid applied to mounted volumes for custom pods.
 // It matches the OpenClaw image's runtime user (node, uid=1000, gid=1000)
 // so the container can write to the persistent volume mounted at the
-// pod's writable data directory. Without this, K8s mounts volumes as
-// root:root 0755 and the non-root container fails with EACCES.
+// pod's writable data directory.
+//
+// Note: fsGroup alone is not sufficient for storage backends that do not
+// implement the kubelet ownership-management hook (notably hostPath PVs and
+// some CSI drivers). For those backends the volume is mounted with the host
+// directory's original ownership (typically root:root 0755), and the non-root
+// container fails with EACCES on first write. To be portable across all
+// storage backends we additionally run a privileged init container that
+// chowns/chmods the mount before the main container starts. fsGroup is kept
+// as a defense-in-depth fallback for backends that *do* honour it.
 const customPodFSGroup int64 = 1000
+
+// customPodRunAsUser is the uid applied inside the permission-fixup init
+// container. It must be 0 (root) so that chown/chmod succeed regardless of
+// the volume's pre-existing ownership.
+const customPodInitRunAsRoot int64 = 0
 
 // PodConfig holds configuration for creating a pod
 type PodConfig struct {
@@ -120,6 +133,7 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		Spec: corev1.PodSpec{
 			RestartPolicy:   corev1.RestartPolicyNever,
 			SecurityContext: buildPodSecurityContext(config.Type),
+			InitContainers:  buildPermissionInitContainers(config, pullPolicy),
 			Containers: []corev1.Container{
 				{
 					Name:            "desktop",
@@ -341,6 +355,56 @@ func buildPodSecurityContext(instanceType string) *corev1.PodSecurityContext {
 	gid := customPodFSGroup
 	return &corev1.PodSecurityContext{
 		FSGroup: &gid,
+	}
+}
+
+// buildPermissionInitContainers returns an init container that fixes the
+// ownership and permissions of the mounted data volume so that the non-root
+// main container (uid/gid 1000) can write to it. This compensates for storage
+// backends (hostPath, certain CSI drivers) that don't honour the pod-level
+// fsGroup. Only applied to custom-type pods, since other instance types run
+// as root and don't need the fixup.
+//
+// We reuse the main container image to avoid pulling an additional image at
+// pod startup; the image already ships sh + chown + chmod (as proven by the
+// supervisor script). The init container itself overrides runAsUser=0 so the
+// chown succeeds regardless of the image's default user.
+func buildPermissionInitContainers(config PodConfig, pullPolicy corev1.PullPolicy) []corev1.Container {
+	if !isCustomInstance(config.Type) {
+		return nil
+	}
+	if config.MountPath == "" {
+		return nil
+	}
+	uid := customPodInitRunAsRoot
+	gid := customPodFSGroup
+	script := fmt.Sprintf(
+		"set -eu; mp=%q; mkdir -p \"$mp\"; chown -R %d:%d \"$mp\"; chmod -R u+rwX,g+rwX \"$mp\"",
+		config.MountPath, gid, gid,
+	)
+	return []corev1.Container{
+		{
+			Name:            "init-perms",
+			Image:           config.Image,
+			ImagePullPolicy: pullPolicy,
+			Command:         []string{"sh", "-c", script},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser: &uid,
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "data", MountPath: config.MountPath},
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("10m"),
+					corev1.ResourceMemory: resource.MustParse("16Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("100m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
+		},
 	}
 }
 
