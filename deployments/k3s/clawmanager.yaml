@@ -618,8 +618,8 @@ spec:
       serviceAccountName: clawmanager-app
       containers:
         - name: clawmanager-app
-          image: ghcr.io/yuan-lab-llm/clawmanager:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/handsomeboy0612/clawmanager-custom:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8443
