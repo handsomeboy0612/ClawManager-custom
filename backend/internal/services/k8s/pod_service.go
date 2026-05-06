@@ -92,6 +92,9 @@ type PodConfig struct {
 	Command []string
 	// Args overrides the container's default CMD when non-empty.
 	Args []string
+	// NodeSelector pins the pod to nodes matching these labels.
+	// Empty map / nil means no constraint (K8s scheduler decides freely).
+	NodeSelector map[string]string
 }
 
 // CreatePod creates a new pod for an instance
@@ -158,6 +161,7 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		Spec: corev1.PodSpec{
 			RestartPolicy:   corev1.RestartPolicyNever,
 			SecurityContext: buildPodSecurityContext(config.Type),
+			NodeSelector:    config.NodeSelector,
 			InitContainers:  buildPermissionInitContainers(config, pullPolicy),
 			Containers: []corev1.Container{
 				{

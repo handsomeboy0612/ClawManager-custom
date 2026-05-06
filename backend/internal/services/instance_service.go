@@ -343,6 +343,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		EnvFromSecretNames: []string{bootstrapSecretName},
 		Command:            req.Command,
 		Args:               req.Args,
+		NodeSelector:       defaultNodeSelector(),
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)
@@ -527,6 +528,7 @@ func (s *instanceService) Start(instanceID int) error {
 		EnvFromSecretNames: []string{bootstrapSecretName},
 		Command:            command,
 		Args:               args,
+		NodeSelector:       defaultNodeSelector(),
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)
