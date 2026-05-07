@@ -153,22 +153,6 @@ func defaultImagePullPolicy() string {
 	return "IfNotPresent"
 }
 
-// defaultNodeSelector returns the node selector applied to every instance pod.
-// Set K8S_NODE_SELECTOR=<label-key>=<label-value> (e.g. "clawmanager/role=primary")
-// to pin all instance pods to nodes carrying that label.
-// Leave unset (default) to let the K8s scheduler assign pods freely.
-func defaultNodeSelector() map[string]string {
-	v := strings.TrimSpace(os.Getenv("K8S_NODE_SELECTOR"))
-	if v == "" {
-		return nil
-	}
-	parts := strings.SplitN(v, "=", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-		return nil
-	}
-	return map[string]string{strings.TrimSpace(parts[0]): strings.TrimSpace(parts[1])}
-}
-
 func defaultEgressProxyURL() (string, bool) {
 	if override := strings.TrimSpace(os.Getenv("CLAWMANAGER_EGRESS_PROXY_URL")); override != "" {
 		return override, true
