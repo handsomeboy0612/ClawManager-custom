@@ -299,12 +299,35 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		}
 	}
 
+	// Pick a target node before creating PVC/Pod so that the hostPath PV
+	// and the Pod that mounts it both land on the same machine. This is
+	// the foundation of multi-Worker safety: every instance is bound to
+	// one node for its entire lifetime.
+	targetNode, err := k8s.SelectNodeForInstance(ctx)
+	if err != nil {
+		if bootstrapSnapshot != nil {
+			_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
+		}
+		s.instanceRepo.Delete(instance.ID)
+		return nil, fmt.Errorf("failed to select node for instance: %w", err)
+	}
+	instance.ScheduledNode = targetNode
+	instance.UpdatedAt = time.Now()
+	if err := s.instanceRepo.Update(instance); err != nil {
+		if bootstrapSnapshot != nil {
+			_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
+		}
+		s.instanceRepo.Delete(instance.ID)
+		return nil, fmt.Errorf("failed to persist scheduled node: %w", err)
+	}
+	fmt.Printf("Instance %d scheduled on node %s\n", instance.ID, targetNode)
+
 	// Create PVC
 	// If storage class is not specified in request, use empty string
 	// PVCService will use the default from K8s client config
 	storageClass := req.StorageClass
 
-	_, err = s.pvcService.CreatePVC(ctx, userID, instance.ID, req.DiskGB, storageClass)
+	_, err = s.pvcService.CreatePVC(ctx, userID, instance.ID, req.DiskGB, storageClass, targetNode)
 	if err != nil {
 		// Rollback: delete instance record
 		if bootstrapSnapshot != nil {
@@ -343,6 +366,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		EnvFromSecretNames: []string{bootstrapSecretName},
 		Command:            req.Command,
 		Args:               req.Args,
+		TargetNode:         targetNode,
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)
@@ -527,6 +551,11 @@ func (s *instanceService) Start(instanceID int) error {
 		EnvFromSecretNames: []string{bootstrapSecretName},
 		Command:            command,
 		Args:               args,
+		// Restart MUST land on the same node as the original Create.
+		// ScheduledNode persisted at create-time guarantees this even
+		// after Pod deletion. Empty value (legacy instance) falls back
+		// to free scheduling, which is only safe in single-node clusters.
+		TargetNode: instance.ScheduledNode,
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)

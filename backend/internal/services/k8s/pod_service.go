@@ -92,6 +92,12 @@ type PodConfig struct {
 	Command []string
 	// Args overrides the container's default CMD when non-empty.
 	Args []string
+	// TargetNode pins the Pod to a specific Kubernetes node hostname,
+	// matching the kubernetes.io/hostname label. When non-empty, the Pod
+	// will only be scheduled onto that node, ensuring it can mount the
+	// hostPath PV that lives on that node's local disk. Empty means K8s
+	// scheduler decides freely (legacy single-node behaviour).
+	TargetNode string
 }
 
 // CreatePod creates a new pod for an instance
@@ -158,6 +164,7 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		Spec: corev1.PodSpec{
 			RestartPolicy:   corev1.RestartPolicyNever,
 			SecurityContext: buildPodSecurityContext(config.Type),
+			NodeSelector:    buildNodeSelector(config.TargetNode),
 			InitContainers:  buildPermissionInitContainers(config, pullPolicy),
 			Containers: []corev1.Container{
 				{
@@ -412,6 +419,17 @@ func buildResourceRequirements(config PodConfig) corev1.ResourceRequirements {
 			corev1.ResourceMemory: resource.MustParse(memLimitStr),
 		},
 	}
+}
+
+// buildNodeSelector returns the nodeSelector map for a Pod, pinning it to
+// a specific node hostname when targetNode is non-empty. Returning nil for
+// the empty case is intentional: K8s treats nil and empty map identically
+// here (no constraint), and nil keeps PodSpec output stable for tests.
+func buildNodeSelector(targetNode string) map[string]string {
+	if targetNode == "" {
+		return nil
+	}
+	return map[string]string{NodeHostnameLabel: targetNode}
 }
 
 // buildPodSecurityContext returns a PodSecurityContext that grants the

@@ -31,6 +31,12 @@ type Instance struct {
 	PodName                  *string    `db:"pod_name" json:"pod_name,omitempty"`
 	PodNamespace             *string    `db:"pod_namespace" json:"pod_namespace,omitempty"`
 	PodIP                    *string    `db:"pod_ip" json:"pod_ip,omitempty"`
+	// ScheduledNode pins the instance's Pod and PV to a specific K8s node
+	// (kubernetes.io/hostname label). Set on first Create, never changed
+	// afterwards so subsequent Restart/Update reuse the same node and the
+	// hostPath PV stays accessible. Empty for legacy instances created
+	// before multi-node scheduling was introduced.
+	ScheduledNode            string     `db:"scheduled_node" json:"scheduled_node,omitempty"`
 	AccessURL                *string    `db:"access_url" json:"access_url,omitempty"`
 	AccessToken              *string    `db:"access_token" json:"-"`
 	AgentBootstrapToken      *string    `db:"agent_bootstrap_token" json:"-"`

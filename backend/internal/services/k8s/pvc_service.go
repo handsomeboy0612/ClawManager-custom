@@ -30,8 +30,15 @@ func (s *PVCService) GetClient() *Client {
 	return s.client
 }
 
-// CreatePVC creates a new PVC for an instance
-func (s *PVCService) CreatePVC(ctx context.Context, userID, instanceID int, storageSizeGB int, storageClass string) (*corev1.PersistentVolumeClaim, error) {
+// CreatePVC creates a new PVC for an instance.
+//
+// targetNode pins the backing PV to a specific Kubernetes node when non-empty:
+// the PV gets a nodeAffinity rule on kubernetes.io/hostname, ensuring the
+// hostPath directory lives only on that node and the matching Pod's
+// nodeSelector lands on the same machine. Pass empty string to keep the
+// legacy single-node behaviour where any node may bind the PV (only safe
+// when the cluster has exactly one node).
+func (s *PVCService) CreatePVC(ctx context.Context, userID, instanceID int, storageSizeGB int, storageClass string, targetNode string) (*corev1.PersistentVolumeClaim, error) {
 	if s.client == nil {
 		return nil, fmt.Errorf("k8s client not initialized")
 	}
@@ -110,19 +117,19 @@ func (s *PVCService) CreatePVC(ctx context.Context, userID, instanceID int, stor
 
 	// Wait for PVC to be bound, if not bound within timeout, create PV manually
 	fmt.Printf("PVC %s created, scheduling async binding monitor...\n", pvcName)
-	go s.monitorPVCBinding(context.Background(), namespace, pvcName, userID, instanceID, storageSizeGB, storageClass, 15*time.Second)
+	go s.monitorPVCBinding(context.Background(), namespace, pvcName, userID, instanceID, storageSizeGB, storageClass, targetNode, 15*time.Second)
 
 	return createdPVC, nil
 }
 
-func (s *PVCService) monitorPVCBinding(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass string, timeout time.Duration) {
-	if _, err := s.waitForPVCBinding(ctx, namespace, pvcName, userID, instanceID, storageSizeGB, storageClass, timeout); err != nil {
+func (s *PVCService) monitorPVCBinding(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass, targetNode string, timeout time.Duration) {
+	if _, err := s.waitForPVCBinding(ctx, namespace, pvcName, userID, instanceID, storageSizeGB, storageClass, targetNode, timeout); err != nil {
 		fmt.Printf("Async PVC binding monitor failed for %s: %v\n", pvcName, err)
 	}
 }
 
 // waitForPVCBinding waits for PVC to be bound, if timeout creates PV manually
-func (s *PVCService) waitForPVCBinding(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass string, timeout time.Duration) (*corev1.PersistentVolumeClaim, error) {
+func (s *PVCService) waitForPVCBinding(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass, targetNode string, timeout time.Duration) (*corev1.PersistentVolumeClaim, error) {
 	// Check if PVC is already bound
 	pvc, err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err != nil {
@@ -144,7 +151,7 @@ func (s *PVCService) waitForPVCBinding(ctx context.Context, namespace, pvcName s
 		case <-timeoutChan:
 			// Timeout, try to create PV manually
 			fmt.Printf("PVC %s binding timeout, creating PV manually\n", pvcName)
-			return s.createPVForPVC(ctx, namespace, pvcName, userID, instanceID, storageSizeGB, storageClass)
+			return s.createPVForPVC(ctx, namespace, pvcName, userID, instanceID, storageSizeGB, storageClass, targetNode)
 		case <-ticker.C:
 			pvc, err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 			if err != nil {
@@ -159,8 +166,14 @@ func (s *PVCService) waitForPVCBinding(ctx context.Context, namespace, pvcName s
 	}
 }
 
-// createPVForPVC creates a PV manually to bind to the PVC
-func (s *PVCService) createPVForPVC(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass string) (*corev1.PersistentVolumeClaim, error) {
+// createPVForPVC creates a PV manually to bind to the PVC.
+//
+// targetNode, when non-empty, sets a kubernetes.io/hostname nodeAffinity on
+// the PV so that K8s only binds it to a Pod scheduled onto that node. This
+// is required for safe multi-Worker clusters: the hostPath directory only
+// exists on the chosen node, so any Pod attempting to mount this PV from a
+// different node would either fail or silently see an empty directory.
+func (s *PVCService) createPVForPVC(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass, targetNode string) (*corev1.PersistentVolumeClaim, error) {
 	pvName := fmt.Sprintf("clawreef-pv-user-%d-instance-%d", userID, instanceID)
 	// Use /tmp path to comply with host_path provisioner requirements
 	hostPath := fmt.Sprintf("/tmp/clawreef/user-%d/instance-%d", userID, instanceID)
@@ -248,6 +261,7 @@ func (s *PVCService) createPVForPVC(ctx context.Context, namespace, pvcName stri
 				UID:             pvc.UID,
 				ResourceVersion: pvc.ResourceVersion,
 			},
+			NodeAffinity: buildPVNodeAffinity(targetNode),
 		},
 	}
 
@@ -369,6 +383,31 @@ func (s *PVCService) DeletePVC(ctx context.Context, userID, instanceID int) erro
 	}
 
 	return nil
+}
+
+// buildPVNodeAffinity returns a VolumeNodeAffinity that pins the PV to a
+// node matching kubernetes.io/hostname=targetNode. Returning nil for the
+// empty case preserves the legacy single-node behaviour where any node may
+// bind the PV (only safe for clusters with one schedulable node).
+func buildPVNodeAffinity(targetNode string) *corev1.VolumeNodeAffinity {
+	if targetNode == "" {
+		return nil
+	}
+	return &corev1.VolumeNodeAffinity{
+		Required: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{
+				{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{
+							Key:      NodeHostnameLabel,
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{targetNode},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // PVCExists checks if a PVC exists
