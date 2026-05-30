@@ -303,7 +303,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	// and the Pod that mounts it both land on the same machine. This is
 	// the foundation of multi-Worker safety: every instance is bound to
 	// one node for its entire lifetime.
-	targetNode, err := k8s.SelectNodeForInstance(ctx)
+	targetNode, err := k8s.SelectNodeForInstance(ctx, instance.Type, instance.CPUCores, instance.MemoryGB)
 	if err != nil {
 		if bootstrapSnapshot != nil {
 			_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)

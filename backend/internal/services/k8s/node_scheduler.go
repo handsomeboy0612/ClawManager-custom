@@ -23,29 +23,45 @@ const NodeSchedulerLabelEnv = "CLAWMANAGER_NODE_LABEL_SELECTOR"
 // to pin storage and compute to the same node.
 const NodeHostnameLabel = "kubernetes.io/hostname"
 
-// SelectNodeForInstance returns the hostname of the most lightly-loaded
-// schedulable node, suitable for hosting a new clawreef instance.
+// SelectNodeForInstance returns the hostname of the schedulable node with the
+// most resource headroom for hosting a new clawreef instance of the given
+// spec. The instanceType/cpuCores/memoryGB describe the instance about to be
+// created so we can (a) rank nodes by real remaining capacity and (b) refuse
+// up front when nothing fits.
 //
 // Selection algorithm:
-//  1. List all nodes (optionally filtered by CLAWMANAGER_NODE_LABEL_SELECTOR).
-//  2. Drop nodes that are NotReady, cordoned (unschedulable=true), or tainted
+//  1. Compute the new Pod's CPU/memory Requests using the exact same overcommit
+//     policy CreatePod applies (buildResourceRequirements), so our headroom
+//     math predicts real kube-scheduler admission.
+//  2. List all nodes (optionally filtered by CLAWMANAGER_NODE_LABEL_SELECTOR).
+//  3. Drop nodes that are NotReady, cordoned (unschedulable=true), or tainted
 //     with NoSchedule effects we cannot tolerate.
-//  3. Count clawreef-managed Pods (label app=clawreef) currently bound to each
-//     remaining node.
-//  4. Return the hostname of the node with the lowest pod count. Ties broken
-//     deterministically by hostname so creates are stable in tests.
+//  4. For each remaining node compute free CPU/memory = Allocatable − sum of
+//     Requests of ALL pods already bound to it (system pods included).
+//  5. Keep only nodes whose free CPU and memory can both admit the new Pod's
+//     Requests, then return the one with the most CPU headroom (the usual
+//     bottleneck), breaking ties by memory headroom then hostname for stable,
+//     test-deterministic placement.
 //
-// Returns an error if zero nodes are schedulable, since the caller cannot
-// safely create a hostPath PV without a target node.
+// Returns an error if zero nodes can fit the instance, so the caller fails the
+// create with a clear "insufficient capacity" message instead of provisioning
+// a hostPath PV + Pod that would hang in Pending forever.
 //
-// Note: we count Pods rather than measuring real CPU/memory because every
-// clawreef instance is roughly equal-sized at the resource-request level
-// (overcommit factor flattens the differences) and because polling
-// metrics-server adds dependencies and latency we don't need.
-func SelectNodeForInstance(ctx context.Context) (string, error) {
+// We read Pod Requests straight from Pod specs rather than polling
+// metrics-server: Requests (not live usage) are exactly what the scheduler
+// sums to decide fit, so no extra dependency is needed.
+func SelectNodeForInstance(ctx context.Context, instanceType string, cpuCores float64, memoryGB int) (string, error) {
 	if globalClient == nil {
 		return "", fmt.Errorf("k8s client not initialized")
 	}
+
+	reqs := buildResourceRequirements(PodConfig{
+		Type:     instanceType,
+		CPUCores: cpuCores,
+		MemoryGB: memoryGB,
+	})
+	needCPUMillis := reqs.Requests.Cpu().MilliValue()
+	needMemBytes := reqs.Requests.Memory().Value()
 
 	listOpts := metav1.ListOptions{}
 	if sel := strings.TrimSpace(os.Getenv(NodeSchedulerLabelEnv)); sel != "" {
@@ -58,8 +74,9 @@ func SelectNodeForInstance(ctx context.Context) (string, error) {
 	}
 
 	type candidate struct {
-		hostname string
-		podCount int
+		hostname     string
+		freeCPUMilli int64
+		freeMemBytes int64
 	}
 	candidates := make([]candidate, 0, len(nodeList.Items))
 
@@ -73,23 +90,40 @@ func SelectNodeForInstance(ctx context.Context) (string, error) {
 			continue
 		}
 
-		count, err := countClawreefPodsOnNode(ctx, hostname)
+		usedCPU, usedMem, err := sumPodRequestsOnNode(ctx, hostname)
 		if err != nil {
-			// Pod count failure on one node shouldn't break scheduling;
-			// treat it as "very loaded" so we deprioritise it.
-			fmt.Printf("WARN: failed to count pods on node %s: %v\n", hostname, err)
-			count = int(^uint(0) >> 1)
+			// A listing failure on one node shouldn't break scheduling for the
+			// whole cluster; skip it so we never place onto a node whose load
+			// we couldn't measure.
+			fmt.Printf("WARN: failed to sum pod requests on node %s: %v\n", hostname, err)
+			continue
 		}
-		candidates = append(candidates, candidate{hostname, count})
+
+		freeCPU := n.Status.Allocatable.Cpu().MilliValue() - usedCPU
+		freeMem := n.Status.Allocatable.Memory().Value() - usedMem
+
+		// Only consider nodes that can admit this Pod's Requests on both
+		// dimensions; this turns a silent Pending into the explicit error below.
+		if freeCPU < needCPUMillis || freeMem < needMemBytes {
+			continue
+		}
+
+		candidates = append(candidates, candidate{hostname, freeCPU, freeMem})
 	}
 
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("no schedulable nodes available for clawreef instance")
+		return "", fmt.Errorf(
+			"no schedulable node has enough capacity for instance (needs %dm CPU / %d MiB memory requests)",
+			needCPUMillis, needMemBytes/(1024*1024),
+		)
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].podCount != candidates[j].podCount {
-			return candidates[i].podCount < candidates[j].podCount
+		if candidates[i].freeCPUMilli != candidates[j].freeCPUMilli {
+			return candidates[i].freeCPUMilli > candidates[j].freeCPUMilli
+		}
+		if candidates[i].freeMemBytes != candidates[j].freeMemBytes {
+			return candidates[i].freeMemBytes > candidates[j].freeMemBytes
 		}
 		return candidates[i].hostname < candidates[j].hostname
 	})
@@ -135,17 +169,66 @@ func nodeHostname(n *corev1.Node) string {
 	return n.Name
 }
 
-// countClawreefPodsOnNode returns the number of clawreef-managed Pods (across
-// all namespaces) currently scheduled onto the given node. Used to balance
-// new instance placement across Workers.
-func countClawreefPodsOnNode(ctx context.Context, hostname string) (int, error) {
+// sumPodRequestsOnNode returns the total CPU (millicores) and memory (bytes)
+// Requests of ALL pods currently bound to the given node — not just clawreef
+// pods. This matches what the kube-scheduler sums when deciding whether a new
+// pod fits, so system/control-plane pods must be included; counting only
+// clawreef pods would overstate headroom on control-plane nodes and send new
+// instances to a node that is actually full.
+//
+// Succeeded/Failed pods no longer hold node resources, so they are excluded to
+// mirror scheduler accounting.
+func sumPodRequestsOnNode(ctx context.Context, hostname string) (cpuMillis int64, memBytes int64, err error) {
 	pods, err := globalClient.Clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-		LabelSelector: "app=clawreef",
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", hostname),
 	})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return len(pods.Items), nil
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		c, m := podRequests(p)
+		cpuMillis += c
+		memBytes += m
+	}
+	return cpuMillis, memBytes, nil
+}
+
+// podRequests computes a pod's effective resource Requests the way the
+// kube-scheduler does: for each resource, the larger of (sum of regular
+// container requests) and (max of init-container requests). Pod overhead and
+// restartable (sidecar) init containers are ignored — clawreef workloads use
+// neither.
+func podRequests(p *corev1.Pod) (cpuMillis int64, memBytes int64) {
+	var sumCPU, sumMem int64
+	for i := range p.Spec.Containers {
+		r := p.Spec.Containers[i].Resources.Requests
+		sumCPU += r.Cpu().MilliValue()
+		sumMem += r.Memory().Value()
+	}
+
+	var initCPU, initMem int64
+	for i := range p.Spec.InitContainers {
+		r := p.Spec.InitContainers[i].Resources.Requests
+		if v := r.Cpu().MilliValue(); v > initCPU {
+			initCPU = v
+		}
+		if v := r.Memory().Value(); v > initMem {
+			initMem = v
+		}
+	}
+
+	cpuMillis = sumCPU
+	if initCPU > cpuMillis {
+		cpuMillis = initCPU
+	}
+	memBytes = sumMem
+	if initMem > memBytes {
+		memBytes = initMem
+	}
+	return cpuMillis, memBytes
 }
 
