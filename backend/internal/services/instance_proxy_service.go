@@ -151,6 +151,11 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	if shouldRewriteHTML {
 		proxyReq.Header.Del("Accept-Encoding")
 	}
+	// Present an always-allowed Origin to OpenClaw's strict 6.1 Control UI check.
+	if origin := upstreamOriginOverride(accessToken.InstanceType); origin != "" {
+		proxyReq.Header.Set("Origin", origin)
+		proxyReq.Header.Set("Referer", origin+"/")
+	}
 
 	// Remove hop-by-hop headers
 	s.removeHopByHopHeaders(proxyReq.Header)
@@ -272,6 +277,11 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	upstreamHeader.Del("Sec-Websocket-Extensions")
 	upstreamHeader.Set("X-Forwarded-Proto", requestScheme(r))
 	upstreamHeader.Set("X-Forwarded-Prefix", fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID))
+	// Present an always-allowed Origin to OpenClaw's strict 6.1 Control UI check.
+	if origin := upstreamOriginOverride(accessToken.InstanceType); origin != "" {
+		upstreamHeader.Set("Origin", origin)
+		upstreamHeader.Set("Referer", origin+"/")
+	}
 
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
@@ -615,4 +625,28 @@ func requestScheme(r *http.Request) string {
 		return "https"
 	}
 	return "http"
+}
+
+// openClawUpstreamOrigin is an origin that is ALWAYS present in every OpenClaw
+// instance's gateway.controlUi.allowedOrigins (new-yunwu-api writes
+// http://localhost:18789 + http://127.0.0.1:18789 at bootstrap).
+//
+// OpenClaw 6.1 hardened the Control UI origin check: it strictly compares the
+// browser Origin against allowedOrigins. Instances were bootstrapped with only
+// the region's IP URL (e.g. https://104.194.10.22:30443), so a browser opening
+// the UI through the ClawManager access domain (e.g.
+// https://openclaw.oljjio.click:30443) gets its Origin rejected. Since
+// ClawManager already authenticates every proxied request via the access token
+// (and terminates TLS at its own trusted front door), we rewrite the upstream
+// Origin/Referer to this always-allowed loopback value so the UI works from any
+// access domain without per-instance config edits or a yunwu redeploy.
+const openClawUpstreamOrigin = "http://localhost:18789"
+
+// upstreamOriginOverride returns the Origin to present to the upstream pod, or
+// "" to forward the browser's original Origin unchanged.
+func upstreamOriginOverride(instanceType string) string {
+	if instanceType == "openclaw" {
+		return openClawUpstreamOrigin
+	}
+	return ""
 }
