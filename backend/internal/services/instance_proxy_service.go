@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"clawreef/internal/models"
@@ -163,6 +166,9 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	// Execute request
 	resp, err := s.httpClient.Do(proxyReq)
 	if err != nil {
+		if isUpstreamUnreachable(err) {
+			return describeUpstreamUnreachable(targetPort, err)
+		}
 		return fmt.Errorf("failed to execute proxy request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -293,6 +299,9 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	if err != nil {
 		if resp != nil {
 			defer resp.Body.Close()
+		}
+		if isUpstreamUnreachable(err) {
+			return describeUpstreamUnreachable(targetPort, err)
 		}
 		return fmt.Errorf("failed to connect upstream websocket: %w", err)
 	}
@@ -659,4 +668,47 @@ func upstreamOriginOverride(instanceType string, targetPort int32) string {
 		return openClawUpstreamOrigin
 	}
 	return ""
+}
+
+// isUpstreamUnreachable reports whether err from an upstream HTTP/WebSocket dial
+// means the proxy could not establish a connection to the instance gateway
+// (connection refused, host/net unreachable, reset, or a dial/handshake
+// timeout) — as opposed to an application-level response from a reachable
+// gateway.
+//
+// It uses structured matching (syscall errno, net.Error timeout, *net.OpError
+// with Op=="dial") rather than fragile substring matching, because once a
+// readiness probe is attached the "gateway down" symptom can surface as either
+// ECONNREFUSED (kube-proxy REJECTs when there are no Ready endpoints) or a
+// timeout (packets dropped), depending on the CNI. Client-initiated
+// cancellation is deliberately NOT treated as unreachable.
+func isUpstreamUnreachable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return false
+}
+
+// describeUpstreamUnreachable wraps a dial failure with a clear, actionable
+// message naming the gateway port. The original err is preserved via %w so the
+// handler's log line still records the low-level cause.
+func describeUpstreamUnreachable(targetPort int32, err error) error {
+	return fmt.Errorf("instance gateway not reachable on port %d (it may be starting up, has crashed, or is misconfigured and not listening); please retry shortly or restart the instance: %w", targetPort, err)
 }

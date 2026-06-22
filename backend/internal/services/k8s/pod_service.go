@@ -72,6 +72,17 @@ const (
 	customMinMemRequestMiB    = 256
 )
 
+// openClawGatewayPort is the TCP port the OpenClaw gateway listens on inside
+// every instance pod. OpenClaw instances are provisioned (by new-yunwu-api) as
+// generic instance_type="custom" pods, so — mirroring the convention already
+// used by the proxy layer — the only reliable signal that a custom pod is an
+// OpenClaw gateway (and therefore DOES expose a real, predictable health port)
+// is this port, NOT the instance type. A readiness probe is attached to custom
+// pods only when their ContainerPort matches this, so other custom containers
+// (which may not listen on their ContainerPort) keep their probe-skipped
+// behaviour and are never marked NotReady by mistake.
+const openClawGatewayPort int32 = 18789
+
 // PodConfig holds configuration for creating a pod
 type PodConfig struct {
 	InstanceID         int
@@ -512,8 +523,22 @@ func buildStartupProbe(instanceType string, port int32) *corev1.Probe {
 	}
 }
 
+// buildReadinessProbe attaches a TCP readiness probe so the platform can tell
+// whether an instance is actually serving on its port.
+//
+// Custom pods skip probes by default because their externally-supplied
+// containers may not expose a predictable TCP health port. The one exception is
+// an OpenClaw gateway: it runs as type=custom but is reliably identified by its
+// listen port (openClawGatewayPort). Attaching a readiness probe there makes a
+// crashed or not-yet-bound gateway surface as NotReady — so the instance status
+// reflects reality (instead of a silently-"Running" pod that refuses
+// connections) and the dead pod is removed from the Service endpoints.
+//
+// Only readiness is added: liveness/startup remain skipped for all custom pods
+// (see buildLivenessProbe), so this never kills the container or fights the
+// in-pod supervisor's own ~1s process-level self-heal under RestartPolicyNever.
 func buildReadinessProbe(instanceType string, port int32) *corev1.Probe {
-	if isCustomInstance(instanceType) {
+	if isCustomInstance(instanceType) && port != openClawGatewayPort {
 		return nil
 	}
 	return &corev1.Probe{
