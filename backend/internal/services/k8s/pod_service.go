@@ -57,8 +57,9 @@ const customPodInitRunAsRoot int64 = 0
 // Overcommit configuration for custom-type pods (e.g. OpenClaw).
 //
 // customOvercommitFactor controls how aggressively we shrink resource
-// Requests relative to Limits. With factor=8, a pod selling "4 vCPU / 8 GB"
-// will reserve only 0.5 vCPU / 1 GB on the node, allowing ~8x denser packing.
+// Requests relative to Limits. With factor=16, a pod selling "4 vCPU / 8 GB"
+// will reserve only 0.25 vCPU / 0.5 GB on the node, allowing ~16x denser
+// packing (subject to the per-resource request floors below).
 // Limits are unchanged, so a pod that genuinely tries to use its full quota
 // is still capped at the advertised value (CPU is throttled, memory is
 // OOMKilled).
@@ -67,7 +68,7 @@ const customPodInitRunAsRoot int64 = 0
 // requesting 0 CPU would let the scheduler treat a pod as effectively free,
 // which can lead to runaway packing and node-level pressure.
 const (
-	customOvercommitFactor    = 8
+	customOvercommitFactor    = 16
 	customMinCPURequestMillis = 125 // 0.125 vCPU
 	customMinMemRequestMiB    = 256
 )
